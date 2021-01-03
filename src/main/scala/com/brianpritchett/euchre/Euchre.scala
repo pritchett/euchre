@@ -1,5 +1,5 @@
 package com.brianpritchett.euchre
- 
+
 import cats.implicits._
 import cats._
 import scala.collection.mutable.ListBuffer
@@ -136,9 +136,10 @@ object Euchre {
           .toMap
         res <- playHand[F](dealt, leftOver, dealer)
         winner <- res match {
-          case Some((team, false)) => addAndLoop(team, 1)
-          case Some((team, true))  => addAndLoop(team, 2)
-          case None                => inner(left(dealer), deck, nsScore, ewScore)
+          case Some((team, _, false))    => addAndLoop(team, 2)
+          case Some((team, false, true)) => addAndLoop(team, 1)
+          case Some((team, true, true))  => addAndLoop(team, 2)
+          case None                      => inner(left(dealer), deck, nsScore, ewScore)
         }
       } yield winner
 
@@ -162,7 +163,7 @@ object Euchre {
   )(implicit
       M: Monad[F],
       PI: PlayerInteraction[F]
-  ): F[Option[(Team, Boolean)]] = {
+  ): F[Option[(Team, Boolean, Boolean)]] = {
 
     import M.pure
     import Player.left
@@ -281,20 +282,23 @@ object Euchre {
     } yield (winner._1, winner._2 === 5)
 
     for {
-      trump <- determineTrump[F](dealer, flippedCard, hands)
+      trumpTeam <- determineTrump[F](dealer, flippedCard, hands)
+      trump = trumpTeam.map(_._1)
+      callers = trumpTeam.map(_._2)
       dealersHand <-
         if (trump.contains(flippedSuit))
           PI.askForDiscard(dealer, flippedCard, hands(dealer))
         else pure(hands(dealer))
-      round <- trump.map { t =>
+      round <- trump.map { suit =>
         val newHands = hands.updated(dealer, dealersHand)
+        val startState = RoundState(newHands, suit, none, left(dealer), Map.empty)
         play
-          .run(
-            RoundState(newHands, t, none, left(dealer), Map.empty)
-          )
+          .run(startState)
           .map(_._2.some)
       } getOrElse pure(none)
-    } yield round
+    } yield round.map { case (team, all5) =>
+      (team, all5, callers.contains(team))
+    }
 
   }
 
@@ -302,7 +306,7 @@ object Euchre {
       dealer: Player,
       flippedOver: Card,
       hands: Map[Player, Hand]
-  )(implicit PI: PlayerInteraction[F], M: Monad[F]): F[Option[Suit]] = {
+  )(implicit PI: PlayerInteraction[F], M: Monad[F]): F[Option[(Suit, Team)]] = {
 
     import Player._
     import PI._
@@ -310,24 +314,24 @@ object Euchre {
 
     val flipped = flippedOver.suit
 
-    def withSuit(player: Player): F[Option[Suit]] =
+    def withSuit(player: Player): F[Option[(Suit, Team)]] =
       for {
         answer <- askToCallTrumpFirstRound(player, hands(player), flippedOver)
         res <- answer match {
           case Pass if player === dealer => pure(none)
           case Pass                      => withSuit(left(player))
-          case Pick(suit)                => pure(suit.some)
+          case Pick(suit)                => pure((suit, Team.team(player)).some)
         }
       } yield res
 
-    def withoutSuit(player: Player): F[Option[Suit]] =
+    def withoutSuit(player: Player): F[Option[(Suit, Team)]] =
       for {
         answer <- askToCallTrumpSecondRound(player, hands(player), flippedOver)
         res <- answer match {
           case Pass if player === dealer      => pure(none)
           case Pass                           => withoutSuit(left(player))
           case Pick(suit) if suit === flipped => withoutSuit(player)
-          case Pick(suit)                     => pure(suit.some)
+          case Pick(suit)                     => pure((suit, Team.team(player)).some)
         }
       } yield res
 
